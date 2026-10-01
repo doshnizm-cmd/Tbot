@@ -8,6 +8,16 @@ GROQ_KEY = os.environ.get("GROQ_KEY")
 TG_TOKEN = os.environ.get("TG_TOKEN")
 MEMORY_FILE = "memory.json"
 
+print("=" * 50)
+print(f"🔑 GROQ_KEY есть: {bool(GROQ_KEY)}")
+print(f"🔑 TG_TOKEN есть: {bool(TG_TOKEN)}")
+print(f"📁 MEMORY_FILE: {MEMORY_FILE}")
+print("=" * 50)
+
+if not GROQ_KEY or not TG_TOKEN:
+    print("❌ Не хватает ключей! Выход.")
+    exit(1)
+
 app = Flask('')
 
 @app.route('/')
@@ -16,20 +26,14 @@ def home():
 
 port = int(os.environ.get("PORT", 8080))
 
-def run():
+def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 import threading
-t = threading.Thread(target=run)
+t = threading.Thread(target=run_flask)
 t.daemon = True
 t.start()
-
-print(f" GROQ_KEY есть: {bool(GROQ_KEY)}")
-print(f"🔑 TG_TOKEN есть: {bool(TG_TOKEN)}")
-
-if not GROQ_KEY or not TG_TOKEN:
-    print(" Не хватает ключей!")
-    exit(1)
+print(f"🌐 Flask запущен на порту {port}")
 
 def load_memory(user_id):
     if os.path.exists(MEMORY_FILE):
@@ -51,67 +55,70 @@ def save_memory(user_id, fact):
         json.dump(data, f)
 
 def send_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": chat_id, "text": text})
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
+    except Exception as e:
+        print(f"Ошибка отправки: {e}")
 
 def download_file(file_id):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/getFile?file_id={file_id}"
-    resp = requests.get(url).json()
-    if not resp.get("ok"):
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/getFile?file_id={file_id}"
+        resp = requests.get(url, timeout=10).json()
+        if not resp.get("ok"):
+            print(f"Ошибка getFile: {resp}")
+            return None
+        file_path = resp["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{TG_TOKEN}/{file_path}"
+        r = requests.get(file_url, timeout=30)
+        tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+        tmp.write(r.content)
+        tmp.close()
+        print(f" Файл скачан: {tmp.name}")
+        return tmp.name
+    except Exception as e:
+        print(f"Ошибка скачивания: {e}")
         return None
-    file_path = resp["result"]["file_path"]
-    file_url = f"https://api.telegram.org/file/bot{TG_TOKEN}/{file_path}"
-    r = requests.get(file_url)
-    
-    tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
-    tmp.write(r.content)
-    tmp.close()
-    return tmp.name
 
 def transcribe_audio(file_path):
-    url = "https://api.groq.com/openai/v1/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {GROQ_KEY}"}
-    with open(file_path, "rb") as f:
-        files = {"file": ("voice.ogg", f, "audio/ogg")}
-        data = {"model": "whisper-large-v3-turbo", "language": "ru"}
-        resp = requests.post(url, headers=headers, files=files, data=data)
-    os.unlink(file_path)
-    if resp.status_code != 200:
+    try:
+        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {GROQ_KEY}"}
+        with open(file_path, "rb") as f:
+            files = {"file": ("voice.ogg", f, "audio/ogg")}
+            data = {"model": "whisper-large-v3", "language": "ru"}
+            resp = requests.post(url, headers=headers, files=files, data=data, timeout=30)
+        os.unlink(file_path)
+        print(f" Whisper ответ: {resp.status_code}")
+        if resp.status_code != 200:
+            print(f"Whisper ошибка: {resp.text[:200]}")
+            return None
+        return resp.json().get("text", "").strip()
+    except Exception as e:
+        print(f"Ошибка транскрипции: {e}")
         return None
-    return resp.json().get("text", "").strip()
 
 def ask_groq(text, memory):
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
-    data = {
-        "model": "openai/gpt-oss-20b",
-        "messages": [
-            {"role": "system", "content": "Ты — ИИ-ассистент Даниила. Отвечай кратко на русском."},
-            {"role": "user", "content": f"Память:\n{memory}\n\nВопрос: {text}"}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 512
-    }
-    response = requests.post(url, headers=headers, json=data)
-    if response.status_code != 200:
-        return f"Ошибка ИИ: {response.status_code}"
-    return response.json()["choices"][0]["message"]["content"]
+    try:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
+        data = {
+            "model": "openai/gpt-oss-20b",
+            "messages": [
+                {"role": "system", "content": "Ты — ИИ-ассистент Даниила. Отвечай кратко на русском."},
+                {"role": "user", "content": f"Память:\n{memory}\n\nВопрос: {text}"}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 512
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        if response.status_code != 200:
+            return f"Ошибка ИИ: {response.status_code}"
+        return response.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"Ошибка: {e}"
 
-def handle_text(chat_id, user_id, text):
-    if not text or len(text) < 3:
-        return
-    if text == "/start":
-        send_message(chat_id, "Привет! Я ИИ-ассистент с голосом \n\nКоманды:\n/запомни <факт>\n/память\n\nПишите или говорите!")
-    elif text.startswith("/запомни "):
-        save_memory(user_id, text[len("/запомни "):])
-        send_message(chat_id, "✅ Запомнил")
-    elif text == "/память":
-        send_message(chat_id, f" {load_memory(user_id)}")
-    elif not text.startswith("/"):
-        memory = load_memory(user_id)
-        send_message(chat_id, ask_groq(text, memory))
-
-print("✅ Бот запущен!")
+print("✅ Бот запущен! Жду сообщений...")
 offset = 0
 
 while True:
@@ -126,17 +133,26 @@ while True:
             chat_id = msg["chat"]["id"]
             user_id = msg["from"]["id"]
             
-            # Обработка текста
             text = msg.get("text", "").strip()
             if text:
-                handle_text(chat_id, user_id, text)
+                print(f"📩 Текст: {text}")
+                if text == "/start":
+                    send_message(chat_id, "Привет! Я ИИ-ассистент с голосом 🎤\n\nКоманды:\n/запомни <факт>\n/память\n\nПишите или говорите!")
+                elif text.startswith("/запомни "):
+                    save_memory(user_id, text[len("/запомни "):])
+                    send_message(chat_id, "✅ Запомнил")
+                elif text == "/память":
+                    send_message(chat_id, f"💾 {load_memory(user_id)}")
+                elif not text.startswith("/"):
+                    memory = load_memory(user_id)
+                    send_message(chat_id, ask_groq(text, memory))
                 continue
             
-            # Обработка голосовых
             voice = msg.get("voice")
             if voice:
-                file_id = voice["file_id"]
+                print("🎤 Получено голосовое!")
                 send_message(chat_id, "🎤 Слушаю...")
+                file_id = voice["file_id"]
                 file_path = download_file(file_id)
                 if not file_path:
                     send_message(chat_id, "❌ Не удалось скачать голос")
@@ -145,9 +161,9 @@ while True:
                 if not text:
                     send_message(chat_id, "❌ Не удалось распознать речь")
                     continue
-                print(f"🎤 Голос: {text}")
+                print(f"🎤 Распознано: {text}")
                 memory = load_memory(user_id)
                 answer = ask_groq(text, memory)
                 send_message(chat_id, answer)
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"❌ Общая ошибка: {e}")
