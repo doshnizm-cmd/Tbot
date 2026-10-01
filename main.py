@@ -9,7 +9,7 @@ from flask import Flask
 from urllib.parse import quote
 
 print("=" * 60)
-print("🚀 ЗАПУСК БОТА")
+print(" ЗАПУСК БОТА")
 print("=" * 60)
 
 GROQ_KEY = os.environ.get("GROQ_KEY")
@@ -17,14 +17,14 @@ TG_TOKEN = os.environ.get("TG_TOKEN")
 MEMORY_FILE = "memory.json"
 
 print(f"🔑 GROQ_KEY есть: {bool(GROQ_KEY)}")
-print(f"🔑 TG_TOKEN есть: {bool(TG_TOKEN)}")
+print(f" TG_TOKEN есть: {bool(TG_TOKEN)}")
 print(f"📁 PORT: {os.environ.get('PORT', 'не задан')}")
 
 if not GROQ_KEY or not TG_TOKEN:
     print("❌ ОШИБКА: Не хватает ключей!")
     sys.exit(1)
 
-# Flask для health check
+# Flask для health check (Render требует веб-сервер)
 app = Flask('')
 
 @app.route('/')
@@ -46,7 +46,8 @@ print("✅ Flask запущен в фоновом потоке")
 
 time.sleep(2)
 
-# Функции памяти
+# ========== ФУНКЦИИ ПАМЯТИ ==========
+
 def load_memory(user_id):
     if os.path.exists(MEMORY_FILE):
         with open(MEMORY_FILE, "r") as f:
@@ -66,38 +67,46 @@ def save_memory(user_id, fact):
     with open(MEMORY_FILE, "w") as f:
         json.dump(data, f)
 
-# Отправка текста
+# ========== ОТПРАВКА СООБЩЕНИЙ ==========
+
 def send_message(chat_id, text):
     try:
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
     except Exception as e:
-        print(f"❌ Ошибка отправки: {e}")
+        print(f"❌ Ошибка отправки текста: {e}")
 
-# Отправка фото
-def send_photo(chat_id, photo_url, caption=""):
+def send_photo(chat_id, photo_path, caption=""):
+    """Отправляет фото из локального файла"""
     try:
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
-        data = {
-            "chat_id": chat_id,
-            "photo": photo_url,
-            "caption": caption
-        }
-        resp = requests.post(url, json=data, timeout=30)
+        with open(photo_path, "rb") as photo:
+            files = {"photo": photo}
+            data = {"chat_id": chat_id, "caption": caption}
+            resp = requests.post(url, data=data, files=files, timeout=60)
+        
         if resp.status_code != 200:
-            print(f"❌ Ошибка отправки фото: {resp.text}")
+            print(f"❌ Ошибка отправки фото: {resp.text[:200]}")
             return False
+        
+        # Удаляем временный файл
+        if os.path.exists(photo_path):
+            os.unlink(photo_path)
+            print(f"🗑️ Временный файл удалён: {photo_path}")
+        
         return True
     except Exception as e:
         print(f"❌ Ошибка отправки фото: {e}")
         return False
 
-# Скачивание файла (для голосовых)
+# ========== СКАЧИВАНИЕ ФАЙЛОВ (для голосовых) ==========
+
 def download_file(file_id):
     try:
         url = f"https://api.telegram.org/bot{TG_TOKEN}/getFile?file_id={file_id}"
         resp = requests.get(url, timeout=10).json()
         if not resp.get("ok"):
+            print(f"❌ Ошибка getFile: {resp}")
             return None
         file_path = resp["result"]["file_path"]
         file_url = f"https://api.telegram.org/file/bot{TG_TOKEN}/{file_path}"
@@ -105,11 +114,14 @@ def download_file(file_id):
         tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
         tmp.write(r.content)
         tmp.close()
+        print(f"📥 Файл скачан: {tmp.name}")
         return tmp.name
-    except:
+    except Exception as e:
+        print(f"❌ Ошибка скачивания: {e}")
         return None
 
-# Распознавание речи (Whisper)
+# ========== РАСПОЗНАВАНИЕ РЕЧИ (Whisper) ==========
+
 def transcribe_audio(file_path):
     try:
         url = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -119,35 +131,50 @@ def transcribe_audio(file_path):
             data = {"model": "whisper-large-v3", "language": "ru"}
             resp = requests.post(url, headers=headers, files=files, data=data, timeout=30)
         os.unlink(file_path)
+        print(f" Whisper статус: {resp.status_code}")
         if resp.status_code != 200:
+            print(f"❌ Whisper ошибка: {resp.text[:200]}")
             return None
         return resp.json().get("text", "").strip()
-    except:
+    except Exception as e:
+        print(f"❌ Ошибка транскрипции: {e}")
         return None
 
-# Генерация изображения через Pollinations.ai
+# ========== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (Pollinations.ai) ==========
+
 def generate_image(prompt):
     try:
-        # Кодируем промпт для URL
         encoded_prompt = quote(prompt)
-        # URL для генерации (модель Flux, высокое качество)
         image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&model=flux&nologo=true&seed={int(time.time())}"
         
-        print(f" Генерация: {prompt}")
+        print(f"🎨 Генерация: {prompt}")
         print(f"🔗 URL: {image_url}")
         
-        # Проверяем, что изображение доступно
-        resp = requests.head(image_url, timeout=30)
-        if resp.status_code == 200:
-            return image_url
-        else:
-            print(f"❌ Ошибка генерации: {resp.status_code}")
+        # Скачиваем изображение (генерация занимает 10-30 секунд)
+        resp = requests.get(image_url, timeout=90)
+        if resp.status_code != 200:
+            print(f"❌ Ошибка скачивания: {resp.status_code}")
             return None
+        
+        # Проверяем, что это действительно изображение
+        content_type = resp.headers.get('Content-Type', '')
+        if 'image' not in content_type and len(resp.content) < 1000:
+            print(f"❌ Получен не изображение: {content_type}, размер: {len(resp.content)}")
+            return None
+        
+        # Сохраняем во временный файл
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tmp.write(resp.content)
+        tmp.close()
+        print(f"✅ Изображение скачано: {tmp.name} ({len(resp.content)} байт)")
+        
+        return tmp.name
     except Exception as e:
         print(f"❌ Ошибка генерации: {e}")
         return None
 
-# Запрос к Groq (текстовый ИИ)
+# ========== ЗАПРОС К GROQ (ТЕКСТОВЫЙ ИИ) ==========
+
 def ask_groq(text, memory):
     try:
         url = "https://api.groq.com/openai/v1/chat/completions"
@@ -166,14 +193,15 @@ def ask_groq(text, memory):
             return f"⚠️ Ошибка ИИ: {response.status_code}"
         return response.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        return f" Ошибка: {e}"
+        return f"❌ Ошибка: {e}"
 
-# Обработка текстовых команд
+# ========== ОБРАБОТКА ТЕКСТОВЫХ КОМАНД ==========
+
 def handle_text(chat_id, user_id, text):
     if not text or len(text) < 3:
         return
     
-    # Команда /start
+    # /start
     if text == "/start":
         send_message(chat_id, 
             "Привет! Я ИИ-ассистент с голосом и генерацией картинок 🎨\n\n"
@@ -184,16 +212,16 @@ def handle_text(chat_id, user_id, text):
             "/img <описание> - короткий вариант\n\n"
             "Просто пишите или говорите!")
     
-    # Команда /запомни
+    # /запомни
     elif text.startswith("/запомни "):
         save_memory(user_id, text[len("/запомни "):])
         send_message(chat_id, "✅ Запомнил")
     
-    # Команда /память
+    # /память
     elif text == "/память":
         send_message(chat_id, f"💾 {load_memory(user_id)}")
     
-    # Команды генерации картинок
+    # Генерация картинок
     elif text.startswith("/картинка ") or text.startswith("/img "):
         if text.startswith("/картинка "):
             prompt = text[len("/картинка "):]
@@ -201,10 +229,10 @@ def handle_text(chat_id, user_id, text):
             prompt = text[len("/img "):]
         
         send_message(chat_id, "🎨 Генерирую изображение...")
-        image_url = generate_image(prompt)
+        image_path = generate_image(prompt)
         
-        if image_url:
-            send_photo(chat_id, image_url, caption=f" {prompt}")
+        if image_path:
+            send_photo(chat_id, image_path, caption=f"🎨 {prompt}")
         else:
             send_message(chat_id, "❌ Не удалось сгенерировать изображение")
     
@@ -214,7 +242,8 @@ def handle_text(chat_id, user_id, text):
         answer = ask_groq(text, memory)
         send_message(chat_id, answer)
 
-# ГЛАВНЫЙ ЦИКЛ БОТА
+# ========== ГЛАВНЫЙ ЦИКЛ БОТА ==========
+
 print("=" * 60)
 print("✅ БОТ ЗАПУЩЕН! Жду сообщений...")
 print("=" * 60)
@@ -249,7 +278,7 @@ while True:
             # Обработка голосовых
             voice = msg.get("voice")
             if voice:
-                print(f"🎤 Голосовое от {user_id}!")
+                print(f" Голосовое от {user_id}!")
                 send_message(chat_id, "🎤 Слушаю...")
                 
                 file_id = voice["file_id"]
@@ -265,7 +294,7 @@ while True:
                     send_message(chat_id, "❌ Не удалось распознать речь")
                     continue
                 
-                print(f"🎤 Распознано: {text}")
+                print(f" Распознано: {text}")
                 
                 # Если распознанный текст - команда генерации
                 if text.startswith("/картинка ") or text.startswith("/img "):
